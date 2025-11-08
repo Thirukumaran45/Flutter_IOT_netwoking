@@ -16,7 +16,7 @@ class _FooterNavState extends State<FooterNav> {
   final List<Widget> _pages = const [
     UsersDetails(),
     ProtocolSelectionScreen(),
-    Bluetoothconnection()
+    BluetoothConnectionScreen()
   ];
 
   final List<IconData> _icons = [

@@ -1,210 +1,241 @@
-import 'dart:async' show StreamSubscription;
-import 'dart:convert' show utf8;
-import 'dart:developer' show log;
-import 'dart:typed_data' show Uint8List;
-
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart';
+import 'native_bt_server.dart';
 
 class ChatPage extends StatefulWidget {
-  final BluetoothDevice? remote;
+  final BluetoothDevice? remoteDevice;
   final bool isServer;
-  const ChatPage({super.key, this.remote, this.isServer = false});
 
+  const ChatPage({
+    super.key,
+    required this.remoteDevice,
+    required this.isServer,
+  });
 
   @override
   State<ChatPage> createState() => _ChatPageState();
 }
 
 class _ChatPageState extends State<ChatPage> {
-  BluetoothConnection? _connection;
+  BluetoothConnection? _connection; // client connection only
+  StreamSubscription? _serverEventSub; // native server events
+  bool _isConnected = false;
   bool _isConnecting = true;
-  bool get isConnected => _connection != null && _connection!.isConnected;
-  final List<_Msg> _messages = [];
   final TextEditingController _controller = TextEditingController();
-  StreamSubscription<Uint8List>? _inputSub;
+  final List<_Message> _messages = [];
+  final ScrollController _scrollController = ScrollController();
 
-  // NEW: show local device info on host screen
-  String? _localName;
-  String? _localAddress;
-
-@override
-void initState() {
-  super.initState();
-  if (widget.isServer) {
-    _startServer(); // ✅ Start listening for incoming Bluetooth connections
-  } else {
-    _connect(); // client
+  @override
+  void initState() {
+    super.initState();
+    widget.isServer ? _setupServerMode() : _connectAsClient();
   }
-}
 
-  Future<void> _fetchLocalInfo() async {
+  // ---------------- SERVER MODE ----------------
+  Future<void> _setupServerMode() async {
+    setState(() {
+      _isConnecting = true;
+      _messages.add(_Message.system('Starting native server...'));
+    });
     try {
-      final name = await FlutterBluetoothSerial.instance.name;
-      final addr = await FlutterBluetoothSerial.instance.address;
-      setState(() {
-        _localName = name;
-        _localAddress = addr;
+      // Make discoverable first (optional but recommended)
+      await FlutterBluetoothSerial.instance.requestDiscoverable(120);
+
+      // Start native server (Kotlin MainActivity handles starting BluetoothRfcommServer)
+      await NativeBtServer.startServer();
+
+      // Subscribe to native events (logs & incoming messages)
+      _serverEventSub = NativeBtServer.events().listen((dynamic event) {
+        if (event is Map) {
+          final type = event['type'];
+          final text = event['text'] ?? '';
+          if (type == 'message') {
+            setState(() {
+              _messages.add(_Message.remote(text.toString().trim()));
+              _isConnected = true; // client connected (native signalled activity)
+              _isConnecting = false;
+            });
+            _scrollToBottom();
+          } else if (type == 'log') {
+            setState(() {
+              _messages.add(_Message.system(text.toString()));
+            });
+          } else if (type == 'client_closed') {
+            setState(() {
+              _messages.add(_Message.system('Client disconnected'));
+              _isConnected = false;
+            });
+          }
+        }
+      }, onError: (err) {
+        setState(() => _messages.add(_Message.system('Server event error: $err')));
       });
 
-      // optionally add a system message with this info
       setState(() {
-        _messages.add(_Msg.system('This device: ${_localName ?? "Unknown"} (${_localAddress ?? ''})'));
-        _messages.add(_Msg.system('Make this device discoverable and ask peer to Join.'));
+        _messages.add(_Message.system('Native server started – waiting for client...'));
+        _isConnecting = false;
       });
     } catch (e) {
       setState(() {
-        _messages.add(_Msg.system('Failed to get local BT info: $e'));
+        _messages.add(_Message.system('Failed to start native server: $e'));
+        _isConnecting = false;
       });
+      _showErrorDialog('Server start failed: $e');
     }
   }
-Future<void> _startServer() async {
-  try {
-    setState(() => _isConnecting = true);
-    _messages.add(_Msg.system('Waiting for incoming Bluetooth connection...'));
 
-    // Make this device discoverable for 2 minutes
-    await FlutterBluetoothSerial.instance.requestDiscoverable(120);
-
-    // ⚠️ flutter_bluetooth_serial_plus does NOT support accepting incoming connections.
-    // Instead, we just show info for the user and let the CLIENT connect manually.
-    await _fetchLocalInfo();
-    _messages.add(_Msg.system(
-      'Your device is now discoverable.\nAsk the other phone to connect to "${_localName ?? "This Device"}" from its device list.',
-    ));
-
-    setState(() => _isConnecting = false);
-  } catch (e) {
-    setState(() {
-      _isConnecting = false;
-      _messages.add(_Msg.system('Server setup error: $e'));
-    });
-  }
-}
-
-
-
-Future<void> _connect() async {
-  try {
-    setState(() => _isConnecting = true);
-
-    if (widget.isServer) {
-      // Server mode — only waits for incoming connection
-      _messages.add(_Msg.system('Waiting for the other device to connect...'));
+  // ---------------- CLIENT MODE ----------------
+  Future<void> _connectAsClient() async {
+    final remote = widget.remoteDevice;
+    if (remote == null) {
+      _showErrorDialog('No remote device selected.');
       setState(() => _isConnecting = false);
-      return; // Don’t try to connect in host mode
-    }
-
-    // Client mode — connects to the selected remote device
-    if (widget.remote == null) {
-      _messages.add(_Msg.system('No remote device selected.'));
       return;
     }
 
-    _messages.add(_Msg.system('Connecting to ${widget.remote!.name ?? widget.remote!.address}...'));
-    _connection = await BluetoothConnection.toAddress(widget.remote!.address);
-    _messages.add(_Msg.system('Connected to ${widget.remote!.name ?? widget.remote!.address}'));
-
-    // Listen for incoming messages
-    _inputSub = _connection!.input?.listen((Uint8List data) {
-      final text = utf8.decode(data);
-      setState(() => _messages.add(_Msg.fromRemote(text.trim())));
-    }, onDone: () {
-      setState(() => _messages.add(_Msg.system('Connection closed')));
-    });
-
-    setState(() => _isConnecting = false);
-  } catch (e) {
     setState(() {
-      _isConnecting = false;
-      _messages.add(_Msg.system('Connection error: $e'));
+      _isConnecting = true;
+      _messages.add(_Message.system('Connecting to ${remote.name ?? remote.address}...'));
     });
-  }
-}
 
-
-
-  void _sendMessage() {
-    final txt = _controller.text.trim();
-    if (txt.isEmpty || _connection == null) return;
     try {
-      final encoded = utf8.encode(txt + "\n");
-      _connection!.output.add(Uint8List.fromList(encoded));
+      // Cancel discovery (important)
+      try { await FlutterBluetoothSerial.instance.cancelDiscovery(); } catch (_) {}
+
+      // Try bond if needed (optional)
+      final bonded = (await FlutterBluetoothSerial.instance.getBondedDevices())
+          .any((d) => d.address == remote.address);
+      if (!bonded) {
+        // Attempt bond programmatically; user may have to accept pairing
+        await FlutterBluetoothSerial.instance.bondDeviceAtAddress(remote.address);
+      }
+
+      final conn = await BluetoothConnection.toAddress(remote.address).timeout(const Duration(seconds: 25));
+      _connection = conn;
       setState(() {
-        _messages.add(_Msg.fromMe(txt));
-        _controller.clear();
+        _isConnected = true;
+        _isConnecting = false;
+        _messages.add(_Message.system('Connected to ${remote.name ?? remote.address}'));
+      });
+
+      // Listen incoming data
+      _connection?.input?.listen((Uint8List data) {
+        final text = utf8.decode(data).trim();
+        if (text.isNotEmpty) {
+          setState(() => _messages.add(_Message.remote(text)));
+          _scrollToBottom();
+        }
+      }, onDone: () {
+        setState(() {
+          _messages.add(_Message.system('Connection closed by remote'));
+          _isConnected = false;
+        });
+      }, onError: (err) {
+        setState(() => _messages.add(_Message.system('Connection error: $err')));
       });
     } catch (e) {
-      setState(() => _messages.add(_Msg.system('Send failed: $e')));
+      setState(() {
+        _messages.add(_Message.system('Connection failed: $e'));
+        _isConnecting = false;
+      });
+      _showErrorDialog('Connection failed: $e');
     }
   }
 
-Future<void> _disconnect() async {
-  await _inputSub?.cancel();
-  try { await _connection?.close(); } catch (_) {}
-  try { _connection?.dispose(); } catch (_) {}
-  setState(() {
-    _connection = null;
-    _messages.add(_Msg.system('Disconnected'));
-  });
-}
+  // ---------------- SEND ----------------
+  Future<void> _send() async {
+    final txt = _controller.text.trim();
+    if (txt.isEmpty) return;
 
-@override
-void dispose() {
-  _controller.dispose();
-  _inputSub?.cancel();
-  try { _connection?.dispose(); } catch (_) {}
-  super.dispose();
-}
-
-
-  Widget _buildMessageTile(_Msg m) {
-    if (m.type == _MsgType.system) {
-      log(m.text);
-      return ListTile(
-        title: Center(child: Text(m.text, style: const TextStyle(color: Colors.grey))),
-      );
+    if (widget.isServer) {
+      // use native sendToClient
+      final ok = await NativeBtServer.sendToClient(txt + '\n');
+      if (ok) {
+        setState(() => _messages.add(_Message.me(txt)));
+      } else {
+        setState(() => _messages.add(_Message.system('Failed to send to client (native)')));
+      }
+    } else {
+      // client mode: send through RFCOMM socket
+      if (_connection != null && _connection!.isConnected) {
+        _connection!.output.add(Uint8List.fromList(utf8.encode(txt + '\n')));
+        setState(() => _messages.add(_Message.me(txt)));
+      } else {
+        setState(() => _messages.add(_Message.system('Not connected')));
+      }
     }
-    final align = m.type == _MsgType.me ? CrossAxisAlignment.end : CrossAxisAlignment.start;
-    final color = m.type == _MsgType.me ? Colors.pink[100] : Colors.grey[200];
-    final radius = const BorderRadius.all(Radius.circular(12));
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      child: Column(
-        crossAxisAlignment: align,
-        children: [
-          Container(
-            decoration: BoxDecoration(color: color, borderRadius: radius),
-            padding: const EdgeInsets.all(10),
-            child: Text(m.text),
-          ),
+    _controller.clear();
+    _scrollToBottom();
+  }
+
+  // ---------------- UI / Helpers ----------------
+  void _scrollToBottom() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_scrollController.hasClients) {
+        _scrollController.jumpTo(_scrollController.position.maxScrollExtent);
+      }
+    });
+  }
+
+  void _showErrorDialog(String msg) {
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (_) { 
+        return AlertDialog(
+        title: const Text('Bluetooth Error'),
+        content: Text(msg),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('OK')),
         ],
-      ),
+      );},
     );
   }
 
   @override
-  Widget build(BuildContext context) {
-    final deviceName = widget.remote?.name ?? (widget.isServer ? "Host" : "Unknown Device");
-final connStatus = _isConnecting ? 'Connecting...' : (isConnected ? 'Connected' : 'Disconnected');
-    return Scaffold(
-      appBar: AppBar(
-        title: Text('$deviceName — $connStatus'),
+  void dispose() {
+    _serverEventSub?.cancel();
+    _connection?.dispose();
+    // ensure native server stopped when leaving UI (optional)
+    if (widget.isServer) {
+      // ignore: body_might_complete_normally_catch_error
+      NativeBtServer.stopServer().catchError((_) {});
+    }
+    super.dispose();
+  }
 
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.power_settings_new),
-            onPressed: () => _disconnect(),
-            tooltip: 'Disconnect',
-          )
-        ],
-      ),
+  @override
+  Widget build(BuildContext context) {
+    final title = _isConnecting
+        ? 'Connecting...'
+        : (_isConnected ? 'Connected' : 'Disconnected');
+
+    return Scaffold(
+      appBar: AppBar(title: Text(title), backgroundColor: Colors.pink),
       body: Column(
         children: [
           Expanded(
             child: ListView.builder(
+              controller: _scrollController,
               itemCount: _messages.length,
-              itemBuilder: (c, i) => _buildMessageTile(_messages[i]),
+              itemBuilder: (_, i) {
+                final m = _messages[i];
+                return Align(
+                  alignment: m.type == _MsgType.me ? Alignment.centerRight : Alignment.centerLeft,
+                  child: Container(
+                    margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: m.type == _MsgType.me ? Colors.pink : Colors.pink.shade100,
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Text(m.text, style: TextStyle(color: m.type == _MsgType.me ? Colors.white : Colors.black)),
+                  ),
+                );
+              },
             ),
           ),
           SafeArea(
@@ -213,16 +244,12 @@ final connStatus = _isConnecting ? 'Connecting...' : (isConnected ? 'Connected' 
               child: Row(
                 children: [
                   Expanded(
-                    child: TextField(
-                      controller: _controller,
-                      decoration: const InputDecoration(hintText: 'Type message'),
-                      onSubmitted: (_) => _sendMessage(),
-                    ),
+                    child: TextField(controller: _controller, decoration: const InputDecoration(hintText: 'Type a message')),
                   ),
                   IconButton(
                     icon: const Icon(Icons.send, color: Colors.pink),
-                    onPressed: _sendMessage,
-                  ),
+                    onPressed: _send,
+                  )
                 ],
               ),
             ),
@@ -235,11 +262,11 @@ final connStatus = _isConnecting ? 'Connecting...' : (isConnected ? 'Connected' 
 
 enum _MsgType { me, remote, system }
 
-class _Msg {
+class _Message {
   final String text;
   final _MsgType type;
-  _Msg(this.text, this.type);
-  factory _Msg.fromMe(String t) => _Msg(t, _MsgType.me);
-  factory _Msg.fromRemote(String t) => _Msg(t, _MsgType.remote);
-  factory _Msg.system(String t) => _Msg(t, _MsgType.system);
+  _Message(this.text, this.type);
+  factory _Message.me(String t) => _Message(t, _MsgType.me);
+  factory _Message.remote(String t) => _Message(t, _MsgType.remote);
+  factory _Message.system(String t) => _Message(t, _MsgType.system);
 }

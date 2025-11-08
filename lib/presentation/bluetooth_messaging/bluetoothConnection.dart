@@ -4,230 +4,216 @@ import 'package:flutter_bluetooth_serial_plus/flutter_bluetooth_serial_plus.dart
 import 'package:permission_handler/permission_handler.dart';
 import 'chatPage.dart';
 
-class Bluetoothconnection extends StatefulWidget {
-  const Bluetoothconnection({super.key});
+class BluetoothConnectionScreen extends StatefulWidget {
+  const BluetoothConnectionScreen({super.key});
+
   @override
-  State<Bluetoothconnection> createState() => _BluetoothconnectionState();
+  State<BluetoothConnectionScreen> createState() =>
+      _BluetoothConnectionScreenState();
 }
 
-class _BluetoothconnectionState extends State<Bluetoothconnection> {
+class _BluetoothConnectionScreenState extends State<BluetoothConnectionScreen> {
   BluetoothState _bluetoothState = BluetoothState.UNKNOWN;
-  StreamSubscription<BluetoothState>? _btStateSub;
+  List<BluetoothDevice> _bondedDevices = [];
+  List<BluetoothDiscoveryResult> _discoveredDevices = [];
+  StreamSubscription<BluetoothDiscoveryResult>? _discoveryStream;
   bool _isDiscovering = false;
-  final List<BluetoothDiscoveryResult> _discovered = [];
-  StreamSubscription<BluetoothDiscoveryResult>? _discoveryStreamSub;
 
   @override
   void initState() {
     super.initState();
-    FlutterBluetoothSerial .instance.state.then((s) {
-      setState(() => _bluetoothState = s);
-    });
-    _btStateSub = FlutterBluetoothSerial.instance
-        .onStateChanged()
-        .listen((BluetoothState state) {
-      setState(() => _bluetoothState = state);
-    });
+    _initBluetooth();
   }
 
-  @override
-  void dispose() {
-    _btStateSub?.cancel();
-    _discoveryStreamSub?.cancel();
-    super.dispose();
-  }
-
-  Future<void> _requestPermissions() async {
+  Future<void> _initBluetooth() async {
+    // Request required permissions
     await [
-      Permission.location,
       Permission.bluetooth,
       Permission.bluetoothScan,
       Permission.bluetoothConnect,
       Permission.bluetoothAdvertise,
+      Permission.location
     ].request();
+
+    final state = await FlutterBluetoothSerial.instance.state;
+    setState(() => _bluetoothState = state);
+
+    if (state == BluetoothState.STATE_OFF) {
+      await FlutterBluetoothSerial.instance.requestEnable();
+    }
+
+    _loadBondedDevices();
+
+    // Listen to Bluetooth state changes
+    FlutterBluetoothSerial.instance.onStateChanged().listen((s) {
+      setState(() => _bluetoothState = s);
+      if (s == BluetoothState.STATE_ON) {
+        _loadBondedDevices();
+      }
+    });
   }
 
-  Future<void> _startDiscovery() async {
-    await _requestPermissions();
+  Future<void> _loadBondedDevices() async {
+    try {
+      final devices = await FlutterBluetoothSerial.instance.getBondedDevices();
+      setState(() => _bondedDevices = devices);
+    } catch (e) {
+      debugPrint("Error getting bonded devices: $e");
+    }
+  }
+
+  void _startDiscovery() {
     setState(() {
-      _discovered.clear();
       _isDiscovering = true;
+      _discoveredDevices.clear();
     });
 
-    _discoveryStreamSub =
+    _discoveryStream =
         FlutterBluetoothSerial.instance.startDiscovery().listen((r) {
       setState(() {
-        final exists =
-            _discovered.any((d) => d.device.address == r.device.address);
-        if (!exists) _discovered.add(r);
+        // Avoid duplicates
+        final existingIndex = _discoveredDevices
+            .indexWhere((element) => element.device.address == r.device.address);
+        if (existingIndex >= 0) {
+          _discoveredDevices[existingIndex] = r;
+        } else {
+          _discoveredDevices.add(r);
+        }
       });
     });
 
-    _discoveryStreamSub!.onDone(() {
+    _discoveryStream?.onDone(() {
       setState(() => _isDiscovering = false);
     });
   }
 
-  Future<void> _enableBluetooth() async {
-    await FlutterBluetoothSerial.instance.requestEnable();
+  void _stopDiscovery() {
+    _discoveryStream?.cancel();
+    setState(() => _isDiscovering = false);
   }
 
-  Future<void> _disableBluetooth() async {
-    await FlutterBluetoothSerial.instance.requestDisable();
+  Future<void> _hostChat() async {
+    // Make this phone discoverable for 2 minutes
+    final result =
+        await FlutterBluetoothSerial.instance.requestDiscoverable(120);
+    if (result != 0 && mounted) {
+      Navigator.push(
+        context,
+        MaterialPageRoute(
+          builder: (_) => const ChatPage(
+            isServer: true,
+            remoteDevice: null,
+          ),
+        ),
+      );
+    }
   }
 
-  Future<void> _makeDiscoverable() async {
-    final seconds =
-        await FlutterBluetoothSerial.instance.requestDiscoverable(60);
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text('Discoverable for $seconds seconds')),
-    );
-  }
-
-// inside _BluetoothconnectionState
-
-Future<void> _hostSession() async {
-  // make sure runtime permissions are granted
-  await _requestPermissions();
-
-  // Ask system to make this device discoverable for 120 seconds
-  // (user will see the OS dialog and must accept)
-  final int? seconds = await FlutterBluetoothSerial.instance.requestDiscoverable(120);
-
-  // show a quick notification to the user
-  ScaffoldMessenger.of(context).showSnackBar(
-    SnackBar(content: Text('Device discoverable for $seconds seconds')),
-  );
-
-  // navigate to chat page in host mode
-  Navigator.push(
-    context,
-    MaterialPageRoute(
-      builder: (_) => const ChatPage(isServer: true),
-    ),
-  );
-}
-
-
-  void _joinSession(BluetoothDevice device) {
+  void _joinChat(BluetoothDevice device) {
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => ChatPage(remote: device, isServer: false),
+        builder: (_) => ChatPage(
+          isServer: false,
+          remoteDevice: device,
+        ),
       ),
     );
   }
 
-  Widget _buildDeviceTile(BluetoothDiscoveryResult r) {
-    return ListTile(
-      title: Text(r.device.name ?? "Unknown"),
-      subtitle: Text(r.device.address),
-      trailing: ElevatedButton(
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.pink),
-        child: const Text('Join'),
-        onPressed: () => _joinSession(r.device),
-      ),
-    );
+  @override
+  void dispose() {
+    _discoveryStream?.cancel();
+    super.dispose();
   }
 
-  Widget _buildPairedTile(BluetoothDevice d) {
-    return ListTile(
-      title: Text(d.name ?? "Unknown"),
-      subtitle: Text(d.address),
-      trailing: ElevatedButton(
-        style: ElevatedButton.styleFrom(backgroundColor: Colors.pink),
-        child: const Text('Join',style: TextStyle(color: Colors.white),),
-        onPressed: () => _joinSession(d),
+  Widget _buildDeviceTile(BluetoothDevice device) {
+    return Card(
+      margin: const EdgeInsets.symmetric(vertical: 6, horizontal: 10),
+      child: ListTile(
+        leading: const Icon(Icons.bluetooth, color: Colors.pink),
+        title: Text(device.name ?? "Unknown Device"),
+        subtitle: Text(device.address),
+        trailing: ElevatedButton(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: Colors.pink,
+            shape:
+                RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          onPressed: () => _joinChat(device),
+          child: const Text("Join", style: TextStyle(color: Colors.white)),
+        ),
       ),
     );
-  }
-
-  Future<List<BluetoothDevice>> _getBonded() async {
-    return (await FlutterBluetoothSerial.instance.getBondedDevices());
   }
 
   @override
   Widget build(BuildContext context) {
+    final discoveredDevices = _discoveredDevices
+        .map((r) => r.device)
+        .where((d) => d.name != null)
+        .toList();
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Bluetooth Chat'),
         backgroundColor: Colors.pink,
+        title: const Text("Bluetooth Chat"),
         actions: [
           IconButton(
-            icon: Icon(_bluetoothState.isEnabled
-                ? Icons.bluetooth
-                : Icons.bluetooth_disabled),
-            onPressed: () async {
-              if (_bluetoothState.isEnabled) {
-                await _disableBluetooth();
-              } else {
-                await _enableBluetooth();
-              }
-            },
+            icon: Icon(_isDiscovering ? Icons.stop : Icons.search),
+            onPressed: _isDiscovering ? _stopDiscovery : _startDiscovery,
           ),
           IconButton(
-            icon: const Icon(Icons.visibility),
-            onPressed: _makeDiscoverable,
-            tooltip: 'Make discoverable (60s)',
-          ),
-          IconButton(
-            icon: _isDiscovering
-                ? const Icon(Icons.stop)
-                : const Icon(Icons.search),
-            onPressed:
-                _isDiscovering ? () => _discoveryStreamSub?.cancel() : _startDiscovery,
+            icon: const Icon(Icons.add_link),
+            onPressed: _hostChat,
           ),
         ],
       ),
       body: Column(
         children: [
-          const SizedBox(height: 10),
-          ElevatedButton.icon(
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.pink,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(20),
+          if (_bluetoothState == BluetoothState.STATE_OFF)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(20.0),
+                child: Text("Bluetooth is turned off. Please enable it."),
               ),
-            ),
-            onPressed: _hostSession,
-            icon: const Icon(Icons.cast_connected,color: Colors.white,),
-            label: const Text("Host Chat Session",style:  TextStyle(color: Colors.white)),
-          ),
-          const Divider(),
-          Expanded(
-            child: RefreshIndicator(
-              onRefresh: _startDiscovery,
+            )
+          else
+            Expanded(
               child: ListView(
                 children: [
                   const Padding(
                     padding: EdgeInsets.all(8.0),
-                    child: Text('Discovered devices',
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold)),
+                    child: Text(
+                      "Discovered Devices",
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
                   ),
-                  ..._discovered.map(_buildDeviceTile),
+                  if (discoveredDevices.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(16.0),
+                      child: Text("No nearby devices found."),
+                    ),
+                  ...discoveredDevices.map(_buildDeviceTile),
                   const Divider(),
                   const Padding(
                     padding: EdgeInsets.all(8.0),
-                    child: Text('Paired devices',
-                        style: TextStyle(
-                            fontSize: 16, fontWeight: FontWeight.bold)),
+                    child: Text(
+                      "Paired Devices",
+                      style:
+                          TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+                    ),
                   ),
-                  FutureBuilder<List<BluetoothDevice>>(
-                    future: _getBonded(),
-                    builder: (context, snapshot) {
-                      if (!snapshot.hasData) {
-                        return const Center(
-                            child: CircularProgressIndicator());
-                      }
-                      final list = snapshot.data!;
-                      return Column(children: list.map(_buildPairedTile).toList());
-                    },
-                  ),
+                  if (_bondedDevices.isEmpty)
+                    const Padding(
+                      padding: EdgeInsets.all(16.0),
+                      child: Text("No paired devices found."),
+                    ),
+                  ..._bondedDevices.map(_buildDeviceTile),
                 ],
               ),
             ),
-          ),
         ],
       ),
     );
