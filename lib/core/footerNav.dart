@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:iot_app/presentation/Crud/getDelete.dart';
-import 'package:iot_app/presentation/bluetooth_messaging/bluetoothConnection.dart';
+import 'package:iot_app/presentation/bluetooth_messaging/ble/roleSelector.dart';
 import 'package:iot_app/presentation/network_messaging/protocol_selection_screen.dart';
 
 class FooterNav extends StatefulWidget {
@@ -16,7 +16,7 @@ class _FooterNavState extends State<FooterNav> {
   final List<Widget> _pages = const [
     UsersDetails(),
     ProtocolSelectionScreen(),
-    BluetoothConnectionScreen()
+    ModeSelectionScreen()
   ];
 
   final List<IconData> _icons = [

@@ -1,7 +1,8 @@
 import 'dart:developer' show log;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:intl/intl.dart'; // for formatting dates
+import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart'; // for formatting dates
 
 class AddEditUserPage extends StatefulWidget {
   final Map<String, dynamic>? userData;
@@ -34,43 +35,53 @@ class _AddEditUserPageState extends State<AddEditUserPage> {
         TextEditingController(text: widget.userData?["email"] ?? "");
   }
 
-  Future<void> _saveUser() async {
-    if (!_formKey.currentState!.validate()) return;
-    setState(() => _isSaving = true);
+Future<void> _saveUser() async {
+  if (!_formKey.currentState!.validate()) return;
+  setState(() => _isSaving = true);
 
-    try {
-      final url = Uri.parse(isEditMode
-          ? "https://flutteriot.infinityfree.me/api/updateuser.php"
-          : "https://flutteriot.infinityfree.me/api/adduser.php");
+  try {
+    final prefs = await SharedPreferences.getInstance();
+    final userId = prefs.getInt('user_id') ?? 0;
 
-      final body = isEditMode
-          ? {
-              "id": widget.userData!["id"].toString(),
-              "name": _nameController.text,
-              "email": _emailController.text,
-              "dob": _dobController.text,
-              "age": _ageController.text
-            }
-          : {
-              "name": _nameController.text,
-              "email": _emailController.text,
-              "dob": _dobController.text,
-              "age": _ageController.text
-            };
-
-      final res = await http.post(url, body: body);
-      var data = res.body;
-      if (data == "true") {
-        if (mounted) Navigator.pop(context, true);
-      } else {
-        log("Error inserting/updating data: $data");
-      }
-    } catch (e) {
-      log("Error saving user: $e");
-    } finally {
-      setState(() => _isSaving = false);
+    if (userId == 0) {
+      log("User not logged in");
+      return;
     }
+
+    final url = Uri.parse(isEditMode
+        ? "http://192.168.43.2/api/updateuser.php"
+        : "http://192.168.43.2/api/adduser.php");
+
+    final body = isEditMode
+        ? {
+            "user_id": userId.toString(),
+            "id": widget.userData!["id"].toString(),
+            "name": _nameController.text,
+            "email": _emailController.text,
+            "dob": _dobController.text,
+            "age": _ageController.text
+          }
+        : {
+            "user_id": userId.toString(),
+            "name": _nameController.text,
+            "email": _emailController.text,
+            "dob": _dobController.text,
+            "age": _ageController.text
+          };
+
+    final res = await http.post(url, body: body);
+    var data = res.body;
+    if (data == "true") {
+      if (mounted) Navigator.pop(context, true);
+    } else {
+      log("Error inserting/updating data: $data");
+    }
+  } catch (e) {
+    log("Error saving user: $e");
+  } finally {
+    setState(() => _isSaving = false);
   }
+}
 
   // Reusable TextFormField builder
   Widget textInputField(

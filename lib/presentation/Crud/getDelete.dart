@@ -3,6 +3,7 @@ import 'dart:developer' show log;
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:iot_app/presentation/Crud/addEditUser.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 // ------------------------------------------------------
 // USERS PAGE (List + Delete + Navigate to Add/Edit Page)
@@ -23,39 +24,52 @@ class _UsersDetailsState extends State<UsersDetails> {
     _futureUsers = getUserData();
   }
 
-  Future<List<Map<String, dynamic>>> getUserData() async {
-    var url = Uri.parse("https://flutteriot.infinityfree.me//api/getdata.php");
-    final res = await http.get(url);
+Future<List<Map<String, dynamic>>> getUserData() async {
+  final prefs = await SharedPreferences.getInstance();
+  final userId = prefs.getInt('user_id') ?? 0;
 
-    if (res.statusCode == 200) {
-      List data = jsonDecode(res.body);
-      return data.map((e) => Map<String, dynamic>.from(e)).toList();
-    } else {
-      throw Exception("Failed to load data");
-    }
-  }
+  if (userId == 0) return [];
 
-Future<void> deleteUser(int? id) async {
-  var url = Uri.parse("https://flutteriot.infinityfree.me//api/deleteuser.php");
-
-  if (id == null) return; // avoid null id crash
-
-  var res = await http.post(
-    url,
-    body: {"id": id.toString()}, // ✅ Convert to String
-  );
-
-  setState(() {
-    _futureUsers = getUserData();
+  final url = Uri.parse("http://192.168.43.2/api/getdata.php");
+  final res = await http.post(url, body: {
+    "user_id": userId.toString(),
   });
 
-  var data = res.body;
-  if (data == "true") {
-    log("deleted the user");
+  if (res.statusCode == 200) {
+    List data = jsonDecode(res.body);
+    return data.map((e) => Map<String, dynamic>.from(e)).toList();
   } else {
-    log("Error deleting data: $data");
+    throw Exception("Failed to load data");
   }
 }
+
+
+Future<void> deleteUser(int? id) async {
+  if (id == null) return;
+
+  final prefs = await SharedPreferences.getInstance();
+  final userId = prefs.getInt('user_id') ?? 0;
+  if (userId == 0) return; // user not logged in
+
+  final url = Uri.parse("http://192.168.43.2/api/deleteuser.php");
+  final res = await http.post(url, body: {
+    "id": id.toString(),
+    "user_id": userId.toString(),
+  });
+
+  final data = res.body;
+  if (data == "true") {
+    log("User deleted successfully");
+    setState(() {
+      _futureUsers = getUserData(); // refresh list
+    });
+  } else if (data == "not_logged_in") {
+    log("User not logged in");
+  } else {
+    log("Error deleting user: $data");
+  }
+}
+
 
 
   void _navigateToAddUser() async {
@@ -117,8 +131,11 @@ Future<void> deleteUser(int? id) async {
           );
 
           if (shouldLogout == true && context.mounted) {
-            Navigator.pushReplacementNamed(context, '/login');
-          }
+  final prefs = await SharedPreferences.getInstance();
+  await prefs.setBool('isLoggedIn', false);
+  Navigator.pushReplacementNamed(context, '/login');
+}
+
         }
       },
       itemBuilder: (context) => [

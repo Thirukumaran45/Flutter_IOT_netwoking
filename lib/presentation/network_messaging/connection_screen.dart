@@ -17,6 +17,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   final TextEditingController portController = TextEditingController();
   final TextEditingController messageController = TextEditingController();
   final List<String> messages = [];
+  late String myClientId;
 
   Socket? tcpSocket;
   RawDatagramSocket? udpSocket;
@@ -45,6 +46,8 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
   }
 
   Future<void> connect() async {
+    FocusScope.of(context).unfocus(); // ✅ hide keyboard & remove cursor
+
     final ip = ipController.text.trim();
     final portText = portController.text.trim();
 
@@ -61,82 +64,118 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
     try {
       if (widget.protocol == "TCP") {
-        tcpSocket = await Socket.connect(ip, port);
-        connected = true;
-        tcpSocket!.listen(
-          (Uint8List data) => log("Server: ${String.fromCharCodes(data)}"),
-          onError: (e) => showErrorDialog("TCP Error", e.toString()),
-          onDone: () => log("Connection closed by server."),
-        );
-      } else if (widget.protocol == "UDP") {
-        udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
-        connected = true;
-        udpSocket!.listen((event) {
-          if (event == RawSocketEvent.read) {
-            final datagram = udpSocket!.receive();
-            if (datagram != null) {
-              log("Server: ${String.fromCharCodes(datagram.data)}");
-            }
-          }
-        });
-      } else if (widget.protocol == "MQTT") {
-        mqttClient = MqttServerClient('test.mosquitto.org',
-            'flutter_mqtt_${DateTime.now().millisecondsSinceEpoch}');
+  tcpSocket = await Socket.connect(ip, port);
+  connected = true;
+  log("🟢 Connected to TCP server"); // ✅ add this line
+  tcpSocket!.listen((Uint8List data) {
+    final message = String.fromCharCodes(data).trim();
+    if (message.isNotEmpty) log("Server: $message");
+  },
+  onError: (e) => showErrorDialog("TCP Error", e.toString()),
+  onDone: () => log("Connection closed by server."),
+  );
+} else if (widget.protocol == "UDP") {
+  udpSocket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
+  connected = true;
+  log("🟢 Connected to UDP server"); // ✅ add this line
+  udpSocket!.listen((event) {
+    if (event == RawSocketEvent.read) {
+      final datagram = udpSocket!.receive();
+      if (datagram != null) {
+        log("Server: ${String.fromCharCodes(datagram.data)}");
+      }
+    }
+  });
+}
+ else if (widget.protocol == "MQTT") {
+        myClientId = 'flutter_mqtt_${DateTime.now().millisecondsSinceEpoch}';
+        mqttClient = MqttServerClient('test.mosquitto.org', myClientId);
+
         mqttClient!.logging(on: false);
         mqttClient!.onConnected = () => log("✅ Connected to MQTT broker!");
         mqttClient!.onDisconnected = () => log("❌ Disconnected from MQTT.");
-        await mqttClient!.connect();
-        mqttClient!.subscribe('test/topic', MqttQos.atMostOnce);
-        mqttClient!.updates!.listen((messagesList) {
-          final msg =
-              (messagesList[0].payload as MqttPublishMessage).payload.message;
-          final messageString = MqttPublishPayload.bytesToStringAsString(msg);
-          log("MQTT: $messageString");
-        });
-        connected = true;
-      }
 
-      setState(() {});
-      log("✅ Connected successfully via ${widget.protocol}");
+        await mqttClient!.connect();
+
+        mqttClient!.subscribe('test/topic', MqttQos.atMostOnce);
+
+        mqttClient!.updates!.listen((messagesList) {
+          final payload = (messagesList[0].payload as MqttPublishMessage).payload.message;
+          final messageString = MqttPublishPayload.bytesToStringAsString(payload);
+          final splitIndex = messageString.indexOf('::');
+          if (splitIndex == -1) return;
+          final senderId = messageString.substring(0, splitIndex);
+          final actualMessage = messageString.substring(splitIndex + 2);
+          if (senderId != myClientId) {
+            log(actualMessage);
+          }
+        });
+
+        connected = true;
+        setState(() {});
+        log("✅ Connected successfully via MQTT");
+      }
+      setState(() {}); // ✅ update for disconnect button
     } catch (e) {
       await showErrorDialog("Connection Error", e.toString());
     }
   }
+void sendMessage() {
+  final msg = messageController.text.trim();
+  if (msg.isEmpty) {
+    showErrorDialog("Empty Message", "Please type a message before sending.");
+    return;
+  }
+  if (!connected) {
+    showErrorDialog("Not Connected", "Connect to a server first.");
+    return;
+  }
 
-  void sendMessage() {
-    final msg = messageController.text.trim();
-    if (msg.isEmpty) {
-      showErrorDialog("Empty Message", "Please type a message before sending.");
-      return;
-    }
-    if (!connected) {
-      showErrorDialog("Not Connected", "Connect to a server first.");
-      return;
+  String messageWithId = msg;
+  if (widget.protocol == "MQTT") {
+    messageWithId = "$myClientId::$msg";
+  }
+
+  log("You: $msg");
+
+  try {
+    if (widget.protocol == "TCP") {
+      tcpSocket?.write(msg);
+    } else if (widget.protocol == "UDP") {
+      udpSocket?.send(
+        msg.codeUnits,
+        InternetAddress(ipController.text),
+        int.parse(portController.text),
+      );
+    } else if (widget.protocol == "MQTT") {
+      final builder = MqttClientPayloadBuilder()..addString(messageWithId);
+      mqttClient?.publishMessage(
+        'test/topic',
+        MqttQos.atMostOnce,
+        builder.payload!,
+      );
     }
 
-    log("You: $msg");
+    // ✅ Auto clear text field after send
+    messageController.clear();
+    
+  } catch (e) {
+    showErrorDialog("Send Error", e.toString());
+  }
+}
 
-    try {
-      if (widget.protocol == "TCP") {
-        tcpSocket?.write(msg);
-      } else if (widget.protocol == "UDP") {
-        udpSocket?.send(
-          msg.codeUnits,
-          InternetAddress(ipController.text),
-          int.parse(portController.text),
-        );
-      } else if (widget.protocol == "MQTT") {
-        final builder = MqttClientPayloadBuilder()..addString(msg);
-        mqttClient?.publishMessage(
-          'test/topic',
-          MqttQos.atMostOnce,
-          builder.payload!,
-        );
-      }
-      messageController.clear();
-    } catch (e) {
-      showErrorDialog("Send Error", e.toString());
+
+  void disconnect() {
+    if (widget.protocol == "TCP") {
+      tcpSocket?.destroy();
+    } else if (widget.protocol == "UDP") {
+      udpSocket?.close();
+    } else if (widget.protocol == "MQTT") {
+      mqttClient?.disconnect();
     }
+    connected = false;
+    setState(() {});
+    log("🔴 Disconnected");
   }
 
   @override
@@ -149,35 +188,47 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final h = MediaQuery.of(context).size.height;
+    final w = MediaQuery.of(context).size.width;
+
     return Scaffold(
       appBar: AppBar(
         title: Text("${widget.protocol} Messenger"),
+        actions: [
+          if (connected)
+            IconButton(
+              icon: const Icon(Icons.link_off, color: Colors.white),
+              tooltip: "Disconnect",
+              onPressed: disconnect,
+            ),
+        ],
       ),
       body: Container(
-        decoration:  BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
-            colors: [Colors.pink.shade100, Colors.pink.shade50], 
+            colors: [Colors.pink.shade100, Colors.pink.shade50],
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
           ),
         ),
         child: SafeArea(
           child: Padding(
-            padding: const EdgeInsets.all(16),
+            padding: EdgeInsets.all(w * 0.04),
             child: Column(
               children: [
-                const SizedBox(height: 12),
+                SizedBox(height: h * 0.015),
                 Card(
                   elevation: 6,
                   color: Colors.white,
                   shape: RoundedRectangleBorder(
                       borderRadius: BorderRadius.circular(20)),
                   child: Padding(
-                    padding: const EdgeInsets.all(16),
+                    padding: EdgeInsets.all(w * 0.04),
                     child: Column(
                       children: [
                         TextField(
                           controller: ipController,
+                          enabled: !connected, // ✅ disable when connected
                           decoration: const InputDecoration(
                             labelText: "Server IP",
                             prefixIcon:
@@ -187,9 +238,10 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                             ),
                           ),
                         ),
-                        const SizedBox(height: 10),
+                        SizedBox(height: h * 0.012),
                         TextField(
                           controller: portController,
+                          enabled: !connected, // ✅ disable when connected
                           decoration: const InputDecoration(
                             labelText: "Port",
                             prefixIcon:
@@ -200,15 +252,15 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                           ),
                           keyboardType: TextInputType.number,
                         ),
-                        const SizedBox(height: 10),
+                        SizedBox(height: h * 0.012),
                         ElevatedButton.icon(
-                          onPressed: connect,
+                          onPressed: connected ? null : connect,
                           icon: const Icon(Icons.link),
                           label: const Text("Connect"),
                           style: ElevatedButton.styleFrom(
                             backgroundColor: Colors.pinkAccent,
                             foregroundColor: Colors.white,
-                            minimumSize: const Size.fromHeight(45),
+                            minimumSize: Size(w, h * 0.06),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(12),
                             ),
@@ -218,24 +270,25 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 12),
+                SizedBox(height: h * 0.015),
+                
                 Expanded(
                   child: Container(
                     decoration: BoxDecoration(
                       color: Colors.white.withOpacity(0.95),
                       borderRadius: BorderRadius.circular(16),
-                      border: Border.all(color: Colors.grey)
+                      border: Border.all(color: Colors.grey),
                     ),
                     child: ListView.builder(
-                      padding: const EdgeInsets.all(12),
+                      padding: EdgeInsets.all(w * 0.03),
                       itemCount: messages.length,
                       itemBuilder: (_, i) => Align(
                         alignment: messages[i].startsWith("You")
                             ? Alignment.centerRight
                             : Alignment.centerLeft,
                         child: Container(
-                          margin: const EdgeInsets.symmetric(vertical: 4),
-                          padding: const EdgeInsets.all(10),
+                          margin: EdgeInsets.symmetric(vertical: h * 0.005),
+                          padding: EdgeInsets.all(w * 0.03),
                           decoration: BoxDecoration(
                             color: messages[i].startsWith("You")
                                 ? Colors.pink.shade100
@@ -248,7 +301,7 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                     ),
                   ),
                 ),
-                const SizedBox(height: 10),
+                SizedBox(height: h * 0.01),
                 Row(
                   children: [
                     Expanded(
@@ -257,33 +310,30 @@ class _ConnectionScreenState extends State<ConnectionScreen> {
                         decoration: InputDecoration(
                           focusedBorder: OutlineInputBorder(
                             borderSide: BorderSide(color: Colors.pink),
-                            
                             borderRadius: BorderRadius.circular(12),
-                          ) ,
+                          ),
                           disabledBorder: OutlineInputBorder(
                             borderSide: BorderSide(color: Colors.pink),
-                            
                             borderRadius: BorderRadius.circular(12),
                           ),
                           hintText: "Enter message",
                           filled: true,
                           fillColor: Colors.white,
-                          border:  OutlineInputBorder(
+                          border: OutlineInputBorder(
                             borderSide: BorderSide(color: Colors.pink),
-                            
                             borderRadius: BorderRadius.circular(12),
                           ),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 8),
+                    SizedBox(width: w * 0.02),
                     FloatingActionButton(
                       onPressed: sendMessage,
                       backgroundColor: Colors.pinkAccent,
                       child: const Icon(Icons.send, color: Colors.white),
                     ),
                   ],
-                )
+                ),
               ],
             ),
           ),

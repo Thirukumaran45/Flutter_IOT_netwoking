@@ -14,15 +14,12 @@ class _SignupScreenState extends State<SignupScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
-  bool _isLoading = false;
  bool _obscurePassword = true;
   Future<void> _registerUser() async {
     if (!_formKey.currentState!.validate()) return;
-
-    setState(() => _isLoading = true);
     try {
       final response = await http.post(
-        Uri.parse("http://192.168.43.2//api/register.php"),
+        Uri.parse("http://192.168.43.2/api/register.php"),
         body: {
           "username": _usernameController.text,
           "email": _emailController.text,
@@ -41,9 +38,7 @@ class _SignupScreenState extends State<SignupScreen> {
       }
     } catch (e) {
       _showDialog("Error", "email already exits !");
-    } finally {
-      setState(() => _isLoading = false);
-    }
+    } 
   }
 
   Future<void> _showDialog(String title, String message) async {
@@ -114,9 +109,7 @@ class _SignupScreenState extends State<SignupScreen> {
                       value == null || value.isEmpty ? "Enter password" : null,
                 ),
                 const SizedBox(height: 25),
-                _isLoading
-                    ? const CircularProgressIndicator(color: Colors.pink)
-                    : ElevatedButton(
+                ElevatedButton(
                         onPressed: _registerUser,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: Colors.pink,
